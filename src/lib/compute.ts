@@ -3,11 +3,7 @@
  * Deterministic number-crunching — no API calls, no side effects.
  */
 
-export function addDays(date: string, days: number): string {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().split("T")[0];
-}
+export { addDays } from "./dates";
 
 export interface AdSnapshot {
   ad_id: string;
@@ -25,6 +21,27 @@ export interface AdSnapshot {
   snapshot_date?: string;
   campaign_id?: string;
   project_name?: string;
+}
+
+/** Map a daily_ad_snapshots row (numeric columns arrive as strings) to an AdSnapshot. */
+export function rowToSnapshot(row: Record<string, unknown>): AdSnapshot {
+  return {
+    ad_id: String(row.ad_id),
+    ad_name: String(row.ad_name ?? ""),
+    campaign_id: row.campaign_id ? String(row.campaign_id) : undefined,
+    campaign_name: String(row.campaign_name ?? ""),
+    adset_name: String(row.adset_name ?? ""),
+    project_name: row.project_name ? String(row.project_name) : undefined,
+    snapshot_date: row.snapshot_date ? String(row.snapshot_date) : undefined,
+    spend: Number(row.spend) || 0,
+    impressions: Number(row.impressions) || 0,
+    clicks: Number(row.clicks) || 0,
+    ctr: Number(row.ctr) || 0,
+    cpc: Number(row.cpc) || 0,
+    cpm: Number(row.cpm) || 0,
+    results: Number(row.results) || 0,
+    cost_per_result: Number(row.cost_per_result) || 0,
+  };
 }
 
 export function formatNum(n: number, decimals = 2) {
@@ -215,10 +232,12 @@ export function computeDailySummary(
     .slice(0, 3);
 
   // Aggregate by campaign
+  // Group by campaign_id (names are not unique across accounts / over time)
   const campMap = new Map<string, any>();
   for (const a of snapshots) {
     const cName = a.campaign_name || "Unknown Campaign";
-    const existing = campMap.get(cName) || {
+    const cKey = a.campaign_id || `name:${a.project_name ?? ""}:${cName}`;
+    const existing = campMap.get(cKey) || {
       campaign_name: cName,
       spend: 0,
       impressions: 0,
@@ -231,7 +250,7 @@ export function computeDailySummary(
     existing.clicks += a.clicks;
     existing.results += a.results;
     existing.ads.push(a);
-    campMap.set(cName, existing);
+    campMap.set(cKey, existing);
   }
 
   return {
@@ -350,20 +369,21 @@ export function computeWeeklySummary(
     .slice(0, 3);
 
   // Campaign breakdown
-  const campMap = new Map<string, { spend: number; results: number; ads: AdSnapshot[] }>();
+  const campMap = new Map<string, { name: string; spend: number; results: number; ads: AdSnapshot[] }>();
   for (const a of aggregatedAds) {
-    const camp = a.campaign_name || "Unknown";
-    const existing = campMap.get(camp);
+    const name = a.campaign_name || "Unknown";
+    const key = a.campaign_id || `name:${a.project_name ?? ""}:${name}`;
+    const existing = campMap.get(key);
     if (existing) {
       existing.spend += a.spend;
       existing.results += a.results;
       existing.ads.push(a);
     } else {
-      campMap.set(camp, { spend: a.spend, results: a.results, ads: [a] });
+      campMap.set(key, { name, spend: a.spend, results: a.results, ads: [a] });
     }
   }
 
-  const campaigns = Array.from(campMap.entries()).map(([name, data]) => {
+  const campaigns = Array.from(campMap.values()).map(({ name, ...data }) => {
     const campTopAds = [...data.ads]
       .filter((a) => a.results > 0)
       .sort((a, b) => {

@@ -67,20 +67,25 @@ export async function sendNewLeadAlert(newLeads: any[]) {
 }
 
 function generateLeadsCSV(leads: any[]): string {
-  const headers = ["Name", "Phone Number", "Email", "Location", "Configuration", "Remark"];
+  const headers = ["Date", "Project", "Name", "Phone Number", "Email", "Location", "Configuration", "Remark"];
+  // RFC 4180 quoting: wrap every cell and double any embedded quotes
+  const cell = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = leads.map(lead => {
     const fields = lead.field_data || {};
-    // Strip commas to prevent CSV breakage
-    const name = (fields["full_name"] || fields["name"] || "N/A").replace(/,/g, ' ');
-    const email = (fields["email"] || "N/A").replace(/,/g, ' ');
-    const phone = (fields["phone_number"] || fields["phone"] || "N/A").replace(/,/g, ' ');
-    const location = (fields["city"] || fields["location"] || fields["where_are_you_looking_to_buy_property?"] || "N/A").replace(/,/g, ' ');
-    const config = (fields["configuration"] || fields["project_configuration"] || fields["what_type_of_property_are_you_looking_for?"] || "N/A").replace(/,/g, ' ');
-    
-    return `"${name}","${phone}","${email}","${location}","${config}",""`;
+    const name = fields["full_name"] || fields["name"] || "N/A";
+    const email = fields["email"] || "N/A";
+    const phone = fields["phone_number"] || fields["phone"] || "N/A";
+    const location = fields["city"] || fields["location"] || fields["where_are_you_looking_to_buy_property?"] || "N/A";
+    const config = fields["configuration"] || fields["project_configuration"] || fields["what_type_of_property_are_you_looking_for?"] || "N/A";
+    const created = lead.created_time
+      ? new Date(lead.created_time).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+      : "";
+
+    return [created, lead.project_name || "", name, phone, email, location, config, ""].map(cell).join(",");
   });
-  
-  return [headers.join(","), ...rows].join("\n");
+
+  // BOM so Excel opens UTF-8 (₹, Hindi names) correctly
+  return "\uFEFF" + [headers.join(","), ...rows].join("\r\n");
 }
 
 export async function sendDailyReport(yesterdaysLeads: any[], dateStr: string) {
@@ -102,6 +107,7 @@ export async function sendDailyReport(yesterdaysLeads: any[], dateStr: string) {
         Please find the detailed Excel/CSV report attached to this email. It contains the following columns formatted for your sales team:
       </p>
       <ul style="color: #475569; font-size: 14px; margin-bottom: 24px;">
+        <li>Date &amp; Project</li>
         <li>Name</li>
         <li>Phone Number</li>
         <li>Email</li>

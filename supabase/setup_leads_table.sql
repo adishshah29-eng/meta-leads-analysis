@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS public.leads (
   project_name text,
   form_id text,
   field_data jsonb,
+  status text DEFAULT 'New',
   created_at timestamp with time zone DEFAULT now()
 );
 

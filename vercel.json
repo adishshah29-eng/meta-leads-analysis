@@ -2,19 +2,19 @@
   "crons": [
     {
       "path": "/api/ads/fetch-today",
-      "schedule": "0 7 * * *"
-    },
-    {
-      "path": "/api/reports/weekly",
-      "schedule": "30 3 * * 2"
+      "schedule": "0 20 * * *"
     },
     {
       "path": "/api/cron/sync-leads",
-      "schedule": "0 2 * * *"
+      "schedule": "0 21 * * *"
     },
     {
       "path": "/api/cron/daily-report",
       "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/reports/weekly",
+      "schedule": "30 3 * * 1"
     }
   ]
 }

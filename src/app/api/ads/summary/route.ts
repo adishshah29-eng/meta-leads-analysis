@@ -1,191 +1,124 @@
 /**
  * GET /api/ads/summary
  *
- * Returns computed daily summary for a given date (default: today).
+ * Returns computed summary for a date range (default: today, IST).
  * Reads from Supabase — never calls Meta directly.
  *
  * Query params:
- *   ?date=YYYY-MM-DD  (optional, defaults to today)
- *   ?days=14          (optional, number of days to include in trend chart data)
+ *   ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD  (or legacy ?date=)
+ *   ?project=<name>|all
+ *   ?days=14   number of days in the trend chart, ending at endDate
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
-import { computeDailySummary, aggregateSnapshots, type AdSnapshot } from "@/lib/compute";
+import { supabase, fetchAllRows } from "@/lib/supabase";
+import { computeDailySummary, aggregateSnapshots, rowToSnapshot } from "@/lib/compute";
+import { addDays, daysBetweenInclusive, todayInAppTz } from "@/lib/dates";
+
+type Row = Record<string, unknown>;
+
+function loadSnapshots(start: string, end: string, project: string | null, columns = "*") {
+  return fetchAllRows<Row>(() => {
+    let q = supabase
+      .from("daily_ad_snapshots")
+      .select(columns)
+      .gte("snapshot_date", start)
+      .lte("snapshot_date", end);
+    if (project && project !== "all") q = q.eq("project_name", project);
+    // Deterministic order so pages never overlap or skip rows
+    return q.order("snapshot_date", { ascending: true }).order("id", { ascending: true }) as never;
+  });
+}
+
+interface PortfolioAcc {
+  project_name: string;
+  account_name: string;
+  spend: number;
+  results: number;
+  impressions: number;
+  clicks: number;
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
+  const today = todayInAppTz();
   const date = searchParams.get("date"); // Legacy param
-  const startDate = searchParams.get("startDate") ?? date ?? new Date().toISOString().split("T")[0];
-  const endDate = searchParams.get("endDate") ?? date ?? new Date().toISOString().split("T")[0];
-  const trendDays = parseInt(searchParams.get("days") ?? "14", 10);
+  const startDate = searchParams.get("startDate") ?? date ?? today;
+  const endDate = searchParams.get("endDate") ?? date ?? today;
+  const trendDays = Math.max(parseInt(searchParams.get("days") ?? "14", 10) || 14, 1);
+  const project = searchParams.get("project");
 
   try {
-    const project = searchParams.get("project");
+    const diffDays = daysBetweenInclusive(startDate, endDate);
+    const priorEnd = addDays(startDate, -1);
+    const priorStart = addDays(priorEnd, -(diffDays - 1));
+    const trendStart = addDays(endDate, -(trendDays - 1));
 
-    // Fetch snapshots for the date range
-    let todayQuery = supabase
-      .from("daily_ad_snapshots")
-      .select("*")
-      .gte("snapshot_date", startDate)
-      .lte("snapshot_date", endDate)
-      .order("spend", { ascending: false });
+    const [currentRows, priorRows, trendRows] = await Promise.all([
+      loadSnapshots(startDate, endDate, project),
+      loadSnapshots(priorStart, priorEnd, project),
+      loadSnapshots(trendStart, endDate, project, "id, snapshot_date, spend, results, impressions, clicks"),
+    ]);
 
-    if (project && project !== "all") {
-      todayQuery = todayQuery.eq("project_name", project);
-    }
+    const snapshots = currentRows.map(rowToSnapshot);
 
-    const { data: todayData, error: todayError } = await todayQuery;
-
-    if (todayError) {
-      return NextResponse.json(
-        { error: todayError.message },
-        { status: 500 }
-      );
-    }
-
-    const snapshots: AdSnapshot[] = (todayData ?? []).map((row) => ({
-      ad_id: row.ad_id,
-      ad_name: row.ad_name,
-      campaign_name: row.campaign_name ?? "",
-      adset_name: row.adset_name ?? "",
-      spend: Number(row.spend),
-      impressions: Number(row.impressions),
-      clicks: Number(row.clicks),
-      ctr: Number(row.ctr),
-      cpc: Number(row.cpc),
-      cpm: Number(row.cpm),
-      results: Number(row.results),
-      cost_per_result: Number(row.cost_per_result),
-      project_name: row.project_name,
-    }));
-
-    // Calculate Portfolio Breakdown if viewing "all"
-    let portfolio: any[] = [];
+    // Portfolio breakdown (one row per project) when viewing "all"
+    let portfolio: Array<PortfolioAcc & { cost_per_result: number; ctr: number }> = [];
     if (!project || project === "all") {
-      const pMap = new Map<string, any>();
-      for (const row of todayData ?? []) {
-        const p = row.project_name;
-        const aName = row.account_name ?? p; // Fallback for old records
-        const key = `${p}::${aName}`;
-        const existing = pMap.get(key) ?? {
+      const pMap = new Map<string, PortfolioAcc>();
+      for (const row of currentRows) {
+        const p = String(row.project_name);
+        const existing = pMap.get(p) ?? {
           project_name: p,
-          account_name: aName,
+          account_name: String(row.account_name ?? p),
           spend: 0,
           results: 0,
           impressions: 0,
           clicks: 0,
         };
-        existing.spend += Number(row.spend);
-        existing.results += Number(row.results);
-        existing.impressions += Number(row.impressions);
-        existing.clicks += Number(row.clicks);
-        pMap.set(key, existing);
+        // Rows are ordered by date, so the latest account name wins
+        if (row.account_name) existing.account_name = String(row.account_name);
+        existing.spend += Number(row.spend) || 0;
+        existing.results += Number(row.results) || 0;
+        existing.impressions += Number(row.impressions) || 0;
+        existing.clicks += Number(row.clicks) || 0;
+        pMap.set(p, existing);
       }
-      portfolio = Array.from(pMap.values()).map(p => ({
-        ...p,
-        cost_per_result: p.results > 0 ? p.spend / p.results : 0,
-        ctr: p.impressions > 0 ? (p.clicks / p.impressions) * 100 : 0,
-      })).sort((a, b) => b.spend - a.spend);
+      portfolio = Array.from(pMap.values())
+        .map((p) => ({
+          ...p,
+          cost_per_result: p.results > 0 ? p.spend / p.results : 0,
+          ctr: p.impressions > 0 ? (p.clicks / p.impressions) * 100 : 0,
+        }))
+        .sort((a, b) => b.spend - a.spend);
     }
 
-    const aggregatedSnapshots = aggregateSnapshots(snapshots);
-    
-    // Calculate prior period date range
-    const sdDate = new Date(startDate);
-    const edDate = new Date(endDate);
-    const diffDays = Math.round((edDate.getTime() - sdDate.getTime()) / (1000 * 3600 * 24)) + 1;
-    const priorEndDate = new Date(startDate);
-    priorEndDate.setDate(priorEndDate.getDate() - 1);
-    const priorStartDate = new Date(priorEndDate);
-    priorStartDate.setDate(priorStartDate.getDate() - diffDays + 1);
+    const summary = computeDailySummary(
+      aggregateSnapshots(snapshots),
+      `${startDate} to ${endDate}`,
+      aggregateSnapshots(priorRows.map(rowToSnapshot))
+    );
 
-    const priorStartStr = priorStartDate.toISOString().split("T")[0];
-    const priorEndStr = priorEndDate.toISOString().split("T")[0];
-
-    // Fetch prior snapshots
-    let priorQuery = supabase
-      .from("daily_ad_snapshots")
-      .select("*")
-      .gte("snapshot_date", priorStartStr)
-      .lte("snapshot_date", priorEndStr);
-      
-    if (project && project !== "all") {
-      priorQuery = priorQuery.eq("project_name", project);
-    }
-    
-    const { data: priorData, error: priorError } = await priorQuery;
-    
-    let priorSnapshots: AdSnapshot[] | null = null;
-    if (!priorError && priorData) {
-      const pSnaps = priorData.map((row) => ({
-        ad_id: row.ad_id,
-        ad_name: row.ad_name,
-        campaign_name: row.campaign_name ?? "",
-        adset_name: row.adset_name ?? "",
-        spend: Number(row.spend),
-        impressions: Number(row.impressions),
-        clicks: Number(row.clicks),
-        ctr: Number(row.ctr),
-        cpc: Number(row.cpc),
-        cpm: Number(row.cpm),
-        results: Number(row.results),
-        cost_per_result: Number(row.cost_per_result),
-      }));
-      priorSnapshots = aggregateSnapshots(pSnaps);
-    }
-
-    const summary = computeDailySummary(aggregatedSnapshots, `${startDate} to ${endDate}`, priorSnapshots);
-
-    // Fetch trend data (last N days aggregated totals) from endDate backward
-    const trendStartDate = new Date(endDate);
-    trendStartDate.setDate(trendStartDate.getDate() - trendDays + 1);
-    const trendStart = trendStartDate.toISOString().split("T")[0];
-
-    let trendQuery = supabase
-      .from("daily_ad_snapshots")
-      .select("snapshot_date, spend, results, impressions, clicks")
-      .gte("snapshot_date", trendStart)
-      .lte("snapshot_date", endDate)
-      .order("snapshot_date", { ascending: true });
-
-    if (project && project !== "all") {
-      trendQuery = trendQuery.eq("project_name", project);
-    }
-
-    const { data: trendData, error: trendError } = await trendQuery;
-
-    if (trendError) {
-      console.warn("[summary] Trend data fetch error:", trendError.message);
-    }
-
-    // Aggregate trend by date
-    const trendMap = new Map<
-      string,
-      { spend: number; results: number; impressions: number; clicks: number }
-    >();
-
-    for (const row of trendData ?? []) {
-      const d = row.snapshot_date;
-      const existing = trendMap.get(d) ?? {
-        spend: 0,
-        results: 0,
-        impressions: 0,
-        clicks: 0,
-      };
-      existing.spend += Number(row.spend);
-      existing.results += Number(row.results);
-      existing.impressions += Number(row.impressions);
-      existing.clicks += Number(row.clicks);
+    // Trend: totals per day
+    const trendMap = new Map<string, { spend: number; results: number; impressions: number; clicks: number }>();
+    for (const row of trendRows) {
+      const d = String(row.snapshot_date);
+      const existing = trendMap.get(d) ?? { spend: 0, results: 0, impressions: 0, clicks: 0 };
+      existing.spend += Number(row.spend) || 0;
+      existing.results += Number(row.results) || 0;
+      existing.impressions += Number(row.impressions) || 0;
+      existing.clicks += Number(row.clicks) || 0;
       trendMap.set(d, existing);
     }
 
-    const trend = Array.from(trendMap.entries()).map(([d, v]) => ({
-      date: d,
-      spend: Math.round(v.spend),
-      results: v.results,
-      ctr: v.impressions > 0 ? ((v.clicks / v.impressions) * 100).toFixed(2) : "0",
-    }));
+    const trend = Array.from(trendMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([d, v]) => ({
+        date: d,
+        spend: Math.round(v.spend),
+        results: v.results,
+        ctr: v.impressions > 0 ? ((v.clicks / v.impressions) * 100).toFixed(2) : "0",
+      }));
 
     return NextResponse.json({ summary, trend, portfolio });
   } catch (err) {

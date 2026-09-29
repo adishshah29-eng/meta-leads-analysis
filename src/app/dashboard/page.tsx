@@ -31,6 +31,7 @@ import {
 import { StatCard } from "@/components/StatCard";
 import { SnapshotStatCards, SnapshotTable } from "@/components/snapshots/SnapshotComponents";
 import { computeDailySummary, type AdSnapshot as AdRow, type DailySummary } from "@/lib/compute";
+import { addDays, daysBetweenInclusive, previousMonthRange, todayInAppTz } from "@/lib/dates";
 import { useSearchParams } from "next/navigation";
 import { takeCombinedSnapshot } from "@/lib/snapshot";
 import { ShareButton } from "@/components/ShareButton";
@@ -69,42 +70,35 @@ function formatNum(n: number, decimals = 2) {
   return n.toFixed(decimals);
 }
 
-function formatDateRangeLabel(range: string, sd?: string, ed?: string): string {
-  const today = new Date();
-  const fmt = (d: Date) =>
-    d.toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" });
-
+/** Resolve a preset to IST calendar days ("YYYY-MM-DD"). */
+function resolveRange(range: string, sd?: string, ed?: string): { start: string; end: string } {
+  const today = todayInAppTz();
   switch (range) {
-    case "today": return `Today · ${fmt(today)}`;
-    case "yesterday": {
-      const y = new Date(today); y.setDate(y.getDate() - 1);
-      return `Yesterday · ${fmt(y)}`;
-    }
-    case "last_month": {
-      const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-      const end = new Date(today.getFullYear(), today.getMonth(), 0);
-      return `${fmt(start)} – ${fmt(end)}`;
-    }
-    case "custom": {
-      if (sd && ed) return `${fmt(new Date(sd))} – ${fmt(new Date(ed))}`;
-      return "Custom Range";
-    }
-    case "7d": case "14d": case "30d": default: {
-      const days = range === "7d" ? 7 : range === "14d" ? 14 : 30;
-      const start = new Date(today); start.setDate(start.getDate() - (days - 1));
-      return `${fmt(start)} – ${fmt(today)}`;
-    }
+    case "yesterday": return { start: addDays(today, -1), end: addDays(today, -1) };
+    case "7d": return { start: addDays(today, -6), end: today };
+    case "14d": return { start: addDays(today, -13), end: today };
+    case "30d": return { start: addDays(today, -29), end: today };
+    case "last_month": return previousMonthRange(today);
+    case "custom": return sd && ed ? { start: sd, end: ed } : { start: today, end: today };
+    default: return { start: today, end: today };
   }
 }
 
+function formatDateRangeLabel(range: string, sd?: string, ed?: string): string {
+  // Day strings are formatted as UTC midnight so the label never shifts a day
+  const fmt = (day: string) =>
+    new Date(`${day}T00:00:00Z`).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const { start, end } = resolveRange(range, sd, ed);
+  if (range === "today") return `Today · ${fmt(start)}`;
+  if (range === "yesterday") return `Yesterday · ${fmt(start)}`;
+  if (range === "custom" && !(sd && ed)) return "Custom Range";
+  return `${fmt(start)} – ${fmt(end)}`;
+}
+
 const trendDaysFor = (range: string, sd?: string, ed?: string) => {
-  if (range === "7d") return 7;
-  if (range === "last_month" || range === "30d") return 30;
-  if (range === "custom" && sd && ed) {
-    const diff = new Date(ed).getTime() - new Date(sd).getTime();
-    return Math.max(1, Math.ceil(diff / (1000 * 60 * 60 * 24)) + 1);
-  }
-  return 14;
+  if (range === "today" || range === "yesterday") return 14;
+  const { start, end } = resolveRange(range, sd, ed);
+  return Math.max(1, daysBetweenInclusive(start, end));
 }
 
 function DashboardClient() {
@@ -203,40 +197,18 @@ function DashboardClient() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const today = new Date();
-      let sd = new Date();
-      let ed = new Date();
-      
-      if (dateRange === "yesterday") {
-        sd.setDate(sd.getDate() - 1);
-        ed.setDate(ed.getDate() - 1);
-      } else if (dateRange === "7d") {
-        sd.setDate(sd.getDate() - 6);
-      } else if (dateRange === "14d") {
-        sd.setDate(sd.getDate() - 13);
-      } else if (dateRange === "last_month") {
-        sd = new Date(sd.getFullYear(), sd.getMonth() - 1, 1);
-        ed = new Date(sd.getFullYear(), sd.getMonth(), 0);
-      } else if (dateRange === "custom") {
-        if (customStartDate && customEndDate) {
-          sd = new Date(customStartDate);
-          ed = new Date(customEndDate);
-        }
-      } else if (dateRange === "30d") {
-        sd.setDate(sd.getDate() - 29);
-      }
-
-      const startDate = sd.toISOString().split("T")[0];
-      const endDate = ed.toISOString().split("T")[0];
+      // All presets are calendar days in IST, independent of the device clock's timezone
+      const { start: startDate, end: endDate } = resolveRange(dateRange, customStartDate, customEndDate);
       const trendDays = trendDaysFor(dateRange, customStartDate, customEndDate);
 
       const res = await fetch(`/api/ads/summary?project=${encodeURIComponent(currentProject)}&startDate=${startDate}&endDate=${endDate}&days=${trendDays}`);
       const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       if (json.summary) setSummary(json.summary);
       if (json.trend) setTrend(json.trend);
       if (json.portfolio) setPortfolio(json.portfolio);
-    } catch {
-      showToast("Failed to load dashboard data", "error");
+    } catch (err) {
+      showToast(`Failed to load dashboard data: ${err instanceof Error ? err.message : err}`, "error");
     } finally {
       setLoading(false);
     }
@@ -252,11 +224,12 @@ function DashboardClient() {
       const res = await fetch("/api/ads/fetch-today", { method: "POST" });
       const json = await res.json();
       if (json.success) {
-        showToast(`✓ Fetched ${json.upserted} ads from Meta`, "success");
-        await loadData();
+        showToast(`✓ Fetched ${json.upserted} ad-days from Meta (last 7 days)`, "success");
       } else {
         showToast(json.error ?? "Refresh failed", "error");
       }
+      // Reload even on partial failure: accounts that succeeded were saved
+      await loadData();
     } catch {
       showToast("Network error during refresh", "error");
     } finally {

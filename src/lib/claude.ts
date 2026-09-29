@@ -1,7 +1,9 @@
 /**
  * Claude (Anthropic) API client for generating weekly narrative summaries.
- * Phase 5 — only called from the weekly report computation route.
+ * Only called from the weekly report computation route.
  */
+
+import Anthropic from "@anthropic-ai/sdk";
 
 export interface WeeklyNarrativeInput {
   weekStart: string;
@@ -17,16 +19,16 @@ export interface WeeklyNarrativeInput {
   bottomAds: Array<{ ad_name: string; spend: number; results: number }>;
 }
 
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-5-5";
+
 /**
  * Generate a 3-4 sentence analyst-style weekly summary using Claude.
- * Returns null if ANTHROPIC_API_KEY is not set (graceful degradation).
+ * Returns null if ANTHROPIC_API_KEY is not set or the call fails (graceful degradation).
  */
 export async function generateWeeklyNarrative(
   data: WeeklyNarrativeInput
 ): Promise<string | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-
-  if (!apiKey) {
+  if (!process.env.ANTHROPIC_API_KEY) {
     console.warn("[Claude] ANTHROPIC_API_KEY not set — skipping AI narrative.");
     return null;
   }
@@ -51,31 +53,35 @@ ${data.bottomAds.map((a) => `- ${a.ad_name}: ₹${a.spend.toFixed(0)} spend, ${a
 Write the summary now:`;
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-opus-4-5",
-        max_tokens: 300,
-        messages: [{ role: "user", content: prompt }],
-      }),
+    const client = new Anthropic();
+    const response = await client.beta.messages.create({
+      model: MODEL,
+      max_tokens: 16000,
+      output_config: { effort: "low" },
+      // On a safety decline, re-run on a fallback model chosen by the API
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      messages: [{ role: "user", content: prompt }],
     });
 
-    if (!res.ok) {
-      const err = await res.json();
-      console.error("[Claude] API error:", err);
+    if (response.stop_reason === "refusal") {
+      console.warn("[Claude] Narrative request was declined:", response.stop_details);
       return null;
     }
 
-    const json = await res.json();
-    const text = json.content?.[0]?.text;
-    return text ?? null;
+    // Thinking blocks may precede the answer, so pick the text blocks explicitly
+    const text = response.content
+      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    return text || null;
   } catch (err) {
-    console.error("[Claude] Fetch error:", err);
+    if (err instanceof Anthropic.APIError) {
+      console.error(`[Claude] API error ${err.status}:`, err.message);
+    } else {
+      console.error("[Claude] Request failed:", err);
+    }
     return null;
   }
 }

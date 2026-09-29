@@ -1,115 +1,82 @@
 /**
- * POST /api/ads/fetch-today
+ * POST|GET /api/ads/fetch-today
  *
- * Pulls today's ad insights from Meta Marketing API and upserts
- * them into Supabase daily_ad_snapshots table.
+ * Pulls ad insights from Meta Marketing API and upserts them into
+ * daily_ad_snapshots. By default re-fetches the last 7 days (IST), because
+ * a single mid-day fetch leaves the day incomplete and Meta keeps restating
+ * results for several days as late conversions are attributed.
  *
- * Also accepts ?date=YYYY-MM-DD for historical backfill.
+ * Query params (all optional):
+ *   ?date=YYYY-MM-DD                   single day
+ *   ?since=YYYY-MM-DD&until=YYYY-MM-DD backfill a range
+ *   ?days=N                            last N days ending today (default 7)
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { fetchAdInsights } from "@/lib/meta";
-import { supabase } from "@/lib/supabase";
+import { syncAdSnapshots } from "@/lib/syncAds";
+import { addDays, daysBetweenInclusive, todayInAppTz } from "@/lib/dates";
 
-function verifyCronSecret(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // dev mode — no secret required
-  const auth = req.headers.get("authorization");
-  return auth === `Bearer ${secret}`;
-}
+export const maxDuration = 300;
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DEFAULT_DAYS = 7;
+const MAX_RANGE_DAYS = 90;
 
 export async function POST(req: NextRequest) {
-  // Allow cron invocations with bearer token
-  const isCron = req.headers.get("x-vercel-cron") === "1";
-  if (isCron && !verifyCronSecret(req)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { searchParams } = new URL(req.url);
+  const today = todayInAppTz();
+
+  let since: string;
+  let until: string;
+  const date = searchParams.get("date");
+  if (date) {
+    since = until = date;
+  } else if (searchParams.get("since")) {
+    since = searchParams.get("since")!;
+    until = searchParams.get("until") ?? today;
+  } else {
+    const days = Math.min(
+      Math.max(parseInt(searchParams.get("days") ?? String(DEFAULT_DAYS), 10) || DEFAULT_DAYS, 1),
+      MAX_RANGE_DAYS
+    );
+    until = today;
+    since = addDays(today, -(days - 1));
   }
 
-  const { searchParams } = new URL(req.url);
-  const date =
-    searchParams.get("date") ??
-    new Date().toISOString().split("T")[0]; // today in UTC
+  if (!DAY_RE.test(since) || !DAY_RE.test(until) || since > until) {
+    return NextResponse.json({ success: false, error: "Invalid date range." }, { status: 400 });
+  }
+  if (daysBetweenInclusive(since, until) > MAX_RANGE_DAYS) {
+    return NextResponse.json(
+      { success: false, error: `Range too large; max ${MAX_RANGE_DAYS} days per request.` },
+      { status: 400 }
+    );
+  }
 
   try {
-    const accountsJson = process.env.META_AD_ACCOUNTS || "[]";
-    const accounts: { id: string; name: string }[] = JSON.parse(accountsJson);
+    const accounts = await syncAdSnapshots(since, until);
+    const upserted = accounts.reduce((s, a) => s + a.upserted, 0);
+    const failed = accounts.filter((a) => a.error);
 
-    if (accounts.length === 0) {
-      return NextResponse.json(
-        { success: false, error: "No META_AD_ACCOUNTS configured." },
-        { status: 500 }
-      );
-    }
+    const message =
+      failed.length === 0
+        ? `Fetched ${upserted} ad-day rows for ${since} → ${until}.`
+        : `Fetched ${upserted} rows; ${failed.length} account(s) failed: ${failed
+            .map((f) => `${f.account} (${f.error})`)
+            .join("; ")}`;
 
-    let totalUpserted = 0;
-    const allRows = [];
-
-    for (const account of accounts) {
-      console.log(`[fetch-today] Fetching for ${account.name} (${account.id})`);
-      const insights = await fetchAdInsights(date, account.id);
-
-      const rows = insights.map((ad) => ({
-        snapshot_date: date,
-        account_id: ad.account_id || account.id,
-        account_name: ad.account_name,
-        project_name: account.name,
-        ad_id: ad.ad_id,
-        ad_name: ad.ad_name,
-        campaign_id: ad.campaign_id,
-        campaign_name: ad.campaign_name,
-        adset_id: ad.adset_id,
-        adset_name: ad.adset_name,
-        spend: ad.spend,
-        impressions: ad.impressions,
-        clicks: ad.clicks,
-        ctr: ad.ctr,
-        cpc: ad.cpc,
-        cpm: ad.cpm,
-        results: ad.results,
-        cost_per_result: ad.cost_per_result,
-      }));
-
-      allRows.push(...rows);
-    }
-
-    if (allRows.length === 0) {
-      return NextResponse.json({
-        success: true,
-        message: `No ad data returned from Meta for ${date} across all accounts.`,
-        upserted: 0,
-        date,
-      });
-    }
-
-    const { error } = await supabase
-      .from("daily_ad_snapshots")
-      .upsert(allRows, { onConflict: "snapshot_date,account_id,ad_id" });
-
-    if (error) {
-      console.error("[fetch-today] Supabase upsert error:", error);
-      return NextResponse.json(
-        { success: false, error: error.message },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      success: true,
-      upserted: allRows.length,
-      date,
-      message: `Successfully fetched and stored ${allRows.length} ad snapshots for ${date}.`,
-    });
+    return NextResponse.json(
+      { success: failed.length === 0, partial: failed.length > 0 && upserted > 0, upserted, since, until, accounts, message, error: failed.length ? message : undefined },
+      { status: failed.length === accounts.length ? 502 : 200 }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[fetch-today] Error:", message);
-    return NextResponse.json(
-      { success: false, error: message },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
 
-// Also support GET for cron triggers (Vercel cron uses GET)
+// Vercel cron uses GET
 export async function GET(req: NextRequest) {
   return POST(req);
 }

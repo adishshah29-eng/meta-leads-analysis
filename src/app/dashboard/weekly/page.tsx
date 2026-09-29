@@ -27,15 +27,11 @@ import { StatCard } from "@/components/StatCard";
 import { ShareButton } from "@/components/ShareButton";
 import { SnapshotStatCards, SnapshotTable } from "@/components/snapshots/SnapshotComponents";
 import { useSearchParams } from "next/navigation";
-import { addDays } from "@/lib/compute";
+import { addDays, lastCompletedWeek } from "@/lib/dates";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 function getMostRecentWeekStart(): string {
-  const today = new Date();
-  const dayOfWeek = today.getDay();
-  const lastMonday = new Date(today);
-  lastMonday.setDate(today.getDate() - ((dayOfWeek + 6) % 7) - 7);
-  return lastMonday.toISOString().split("T")[0];
+  return lastCompletedWeek().weekStart;
 }
 
 interface WeeklyReport {

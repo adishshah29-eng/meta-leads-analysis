@@ -13,6 +13,7 @@ import {
 import { useSearchParams } from "next/navigation";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from "recharts";
 import { motion } from "framer-motion";
+import { addDays, dayRangeToInstants, todayInAppTz } from "@/lib/dates";
 
 interface LeadRow {
   id: string;
@@ -53,32 +54,18 @@ export default function LeadsPage() {
       let startDateStr = "";
       let endDateStr = "";
 
+      // IST calendar days (same definition as the Ads dashboard presets)
       if (dateRange !== "all") {
-        const today = new Date();
-        let startDate = new Date();
-        
-        switch (dateRange) {
-          case "today":
-            startDate.setHours(0, 0, 0, 0);
-            break;
-          case "yesterday":
-            startDate.setDate(today.getDate() - 1);
-            startDate.setHours(0, 0, 0, 0);
-            const endDate = new Date(startDate);
-            endDate.setHours(23, 59, 59, 999);
-            endDateStr = endDate.toISOString();
-            break;
-          case "7d":
-            startDate.setDate(today.getDate() - 7);
-            startDate.setHours(0, 0, 0, 0);
-            break;
-          case "30d":
-            startDate.setDate(today.getDate() - 30);
-            startDate.setHours(0, 0, 0, 0);
-            break;
-        }
-        
-        startDateStr = startDate.toISOString();
+        const today = todayInAppTz();
+        const startDay =
+          dateRange === "yesterday" ? addDays(today, -1)
+          : dateRange === "7d" ? addDays(today, -6)
+          : dateRange === "30d" ? addDays(today, -29)
+          : today;
+        const endDay = dateRange === "yesterday" ? addDays(today, -1) : today;
+        const { from, toExclusive } = dayRangeToInstants(startDay, endDay);
+        startDateStr = from;
+        endDateStr = toExclusive;
       }
 
       const params = new URLSearchParams();
@@ -111,12 +98,11 @@ export default function LeadsPage() {
     if (refreshing) return;
     setRefreshing(true);
     try {
-      const dateStr = new Date().toISOString().split("T")[0]; // Sync today by default, or could match date range
-      const res = await fetch(`/api/leads/fetch?date=${dateStr}`, { method: "POST" });
+      const res = await fetch(`/api/leads/fetch?days=7`, { method: "POST" });
       const json = await res.json();
-      if (!json.success) throw new Error(json.error || "Failed to fetch leads");
-      
-      showToast(`Synced ${json.upserted} leads.`, "success");
+      if (json.error) throw new Error(json.error);
+      // Partial failures still saved the leads from ads that succeeded
+      showToast(json.message ?? `Synced ${json.upserted} leads.`, json.success ? "success" : "error");
       await fetchLeads();
     } catch (err: any) {
       showToast(err.message, "error");

@@ -11,7 +11,9 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const searchParams = useSearchParams();
-  const from = searchParams.get("from") ?? "/dashboard";
+  const rawFrom = searchParams.get("from") ?? "/dashboard";
+  // Only allow same-site paths (blocks open redirects like ?from=https://evil.com or //evil.com)
+  const from = rawFrom.startsWith("/") && !rawFrom.startsWith("//") && !rawFrom.startsWith("/\\") ? rawFrom : "/dashboard";
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
