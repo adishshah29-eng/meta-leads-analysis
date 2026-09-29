@@ -14,7 +14,8 @@ import {
   LayoutGrid,
   Check,
   X,
-  Users
+  Users,
+  Activity
 } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 
@@ -34,17 +35,24 @@ const navItems = [
     href: "/dashboard/leads",
     icon: Users,
   },
+  {
+    label: "Data Health",
+    href: "/dashboard/health",
+    icon: Activity,
+  },
 ];
 
 
 export function Sidebar({ 
   projects = [],
   isOpen = false,
-  onClose = () => {}
+  onClose = () => {},
+  healthLevel = null,
 }: { 
   projects?: string[];
   isOpen?: boolean;
   onClose?: () => void;
+  healthLevel?: "ok" | "warn" | "error" | null;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -185,6 +193,13 @@ export function Sidebar({
             >
               <Icon className="w-4 h-4 flex-shrink-0" />
               {label}
+              {href === "/dashboard/health" && healthLevel && healthLevel !== "ok" && (
+                <span
+                  className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded ${healthLevel === "error" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}
+                >
+                  {healthLevel === "error" ? "ISSUE" : "CHECK"}
+                </span>
+              )}
             </Link>
           );
         })}

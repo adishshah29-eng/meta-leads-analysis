@@ -22,8 +22,16 @@ Run `supabase/schema.sql` + `supabase/setup_leads_table.sql` on a new project, t
 | `DASHBOARD_PASSWORD` | Password for `/dashboard` and `/api`. **If unset, everything is open** |
 | `CRON_SECRET` | **Required in production.** Vercel Cron sends it as a Bearer token; API calls without it (or a login cookie) get 401 |
 | `RESEND_API_KEY`, `ALERT_EMAIL_ADDRESS` | Daily leads email |
+| `META_APP_ID`, `META_APP_SECRET` | Optional; lets the Data Health page check the token's expiry reliably |
 | `ANTHROPIC_API_KEY` | Optional AI weekly summary (`ANTHROPIC_MODEL` to override the model) |
 | `NEXT_PUBLIC_APP_TIMEZONE`, `NEXT_PUBLIC_APP_UTC_OFFSET` | Business timezone, default `Asia/Kolkata` / `+05:30` |
+
+## Data Health page (`/dashboard/health`)
+
+- **Background syncs**: last run, last success and recent history of every cron job (recorded in `sync_runs`; run `supabase/migrations/2026_09_sync_health.sql`). Failed or partial cron runs email `ALERT_EMAIL_ADDRESS`.
+- **Meta token**: validity, expiry and permissions; the daily ad sync emails a warning 7 days before expiry.
+- **Meta vs stored numbers**: compares Meta's account-level daily totals (what Ads Manager shows) with the stored ad-level rows, flags missing or mismatched days, and re-syncs them with one click.
+- Every dashboard page shows a banner when something needs attention.
 
 ## Data pipeline (Vercel Cron, times in IST)
 

@@ -310,3 +310,104 @@ export async function fetchLeadDetails(adId: string, sinceUnix?: number): Promis
 
   return allLeads;
 }
+
+export interface AccountDayTotal {
+  date: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  results: number;
+}
+
+/**
+ * Account-level daily totals straight from Meta. These include every ad
+ * (active, paused, deleted, archived), so they are the reference numbers the
+ * stored ad-level rows should add up to — the same totals Ads Manager shows.
+ */
+export async function fetchAccountDailyTotals(
+  since: string,
+  until: string,
+  accountId: string
+): Promise<AccountDayTotal[]> {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token || !accountId) throw new Error("Missing META_ACCESS_TOKEN or accountId.");
+
+  const params = new URLSearchParams({
+    fields: "spend,impressions,clicks,actions,cost_per_action_type",
+    level: "account",
+    time_range: JSON.stringify({ since, until }),
+    time_increment: "1",
+    access_token: token,
+    limit: "500",
+  });
+
+  const out: AccountDayTotal[] = [];
+  let url = `${BASE_URL}/${accountId}/insights?${params.toString()}`;
+  while (url) {
+    const json = await graphGet<RawInsight>(url);
+    for (const raw of json.data ?? []) {
+      out.push({
+        date: raw.date_start,
+        spend: parseFloat(raw.spend ?? "0") || 0,
+        impressions: parseInt(raw.impressions ?? "0", 10) || 0,
+        clicks: parseInt(raw.clicks ?? "0", 10) || 0,
+        results: pickResult(raw).results,
+      });
+    }
+    url = json.paging?.next ?? "";
+  }
+  return out;
+}
+
+export interface TokenHealth {
+  checked: boolean;
+  valid: boolean;
+  /** ISO timestamp, or null when the token never expires (e.g. system user token). */
+  expiresAt: string | null;
+  daysLeft: number | null;
+  missingScopes: string[];
+  error?: string;
+}
+
+const REQUIRED_SCOPES = ["ads_read", "leads_retrieval"];
+
+/**
+ * Inspect META_ACCESS_TOKEN via /debug_token. Uses an app token when
+ * META_APP_ID + META_APP_SECRET are set (most reliable), otherwise the token itself.
+ */
+export async function checkTokenHealth(): Promise<TokenHealth> {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) {
+    return { checked: true, valid: false, expiresAt: null, daysLeft: null, missingScopes: [], error: "META_ACCESS_TOKEN is not set" };
+  }
+  const appId = process.env.META_APP_ID;
+  const appSecret = process.env.META_APP_SECRET;
+  const inspector = appId && appSecret ? `${appId}|${appSecret}` : token;
+
+  try {
+    const params = new URLSearchParams({ input_token: token, access_token: inspector });
+    const res = await fetch(`${BASE_URL}/debug_token?${params.toString()}`, { cache: "no-store" });
+    const json = (await res.json()) as {
+      data?: { is_valid?: boolean; expires_at?: number; scopes?: string[]; error?: { message?: string } };
+      error?: { message: string };
+    };
+    if (json.error || !json.data) {
+      return { checked: false, valid: false, expiresAt: null, daysLeft: null, missingScopes: [], error: json.error?.message ?? "No data from debug_token" };
+    }
+    const d = json.data;
+    const expiresAt = d.expires_at && d.expires_at > 0 ? new Date(d.expires_at * 1000).toISOString() : null;
+    const daysLeft = expiresAt ? Math.floor((d.expires_at! * 1000 - Date.now()) / 86400000) : null;
+    const scopes = d.scopes ?? [];
+    return {
+      checked: true,
+      valid: Boolean(d.is_valid),
+      expiresAt,
+      daysLeft,
+      // Only report missing scopes when Meta returned a scope list at all
+      missingScopes: scopes.length ? REQUIRED_SCOPES.filter((s) => !scopes.includes(s)) : [],
+      error: d.error?.message,
+    };
+  } catch (err) {
+    return { checked: false, valid: false, expiresAt: null, daysLeft: null, missingScopes: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}

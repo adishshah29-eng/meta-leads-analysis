@@ -17,6 +17,7 @@ import { computeWeeklySummary, rowToSnapshot } from "@/lib/compute";
 import { addDays, lastCompletedWeek } from "@/lib/dates";
 import { generateWeeklyNarrative } from "@/lib/claude";
 import { getAdAccounts } from "@/lib/syncAds";
+import { trackRun, triggerOf } from "@/lib/syncRuns";
 
 export const maxDuration = 300;
 
@@ -114,20 +115,30 @@ export async function POST(req: NextRequest) {
     }
 
     // Cron / batch mode: Portfolio + every configured project
-    const names = [PORTFOLIO, ...getAdAccounts().map((a) => a.name)];
     const results: Array<{ project: string; ok: boolean; error?: string }> = [];
-    for (const name of names) {
-      try {
-        await computeAndStore(name, weekStart, weekEnd);
-        results.push({ project: name, ok: true });
-      } catch (err) {
-        results.push({ project: name, ok: false, error: err instanceof Error ? err.message : String(err) });
+    const outcome = await trackRun("weekly", triggerOf(req), async () => {
+      const names = [PORTFOLIO, ...getAdAccounts().map((a) => a.name)];
+      for (const name of names) {
+        try {
+          await computeAndStore(name, weekStart, weekEnd);
+          results.push({ project: name, ok: true });
+        } catch (err) {
+          results.push({ project: name, ok: false, error: err instanceof Error ? err.message : String(err) });
+        }
       }
-    }
-    const failed = results.filter((r) => !r.ok);
+      const failed = results.filter((r) => !r.ok);
+      return {
+        status: failed.length === 0 ? "ok" : failed.length === results.length ? "failed" : "partial",
+        rows: results.length - failed.length,
+        message:
+          `Weekly reports for ${weekStart} → ${weekEnd}: ${results.length - failed.length}/${results.length} built.` +
+          (failed.length ? ` Failed: ${failed.map((f) => `${f.project} (${f.error})`).join("; ")}` : ""),
+        details: { weekStart, weekEnd, results },
+      };
+    });
     return NextResponse.json(
-      { success: failed.length === 0, weekStart, weekEnd, results },
-      { status: failed.length ? 500 : 200 }
+      { success: outcome.status === "ok", weekStart, weekEnd, results, message: outcome.message },
+      { status: outcome.status === "ok" ? 200 : 500 }
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

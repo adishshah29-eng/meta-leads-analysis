@@ -152,3 +152,43 @@ export async function sendDailyReport(yesterdaysLeads: any[], dateStr: string) {
   }
 }
 
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** Alert email for background job failures / token problems. */
+export async function sendSyncAlert(subject: string, lines: string[]) {
+  if (!process.env.RESEND_API_KEY || !process.env.ALERT_EMAIL_ADDRESS) {
+    console.warn("RESEND_API_KEY or ALERT_EMAIL_ADDRESS not set. Skipping sync alert:", subject);
+    return false;
+  }
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h1 style="color: #b91c1c; font-size: 20px; margin-bottom: 16px;">⚠️ ${escapeHtml(subject)}</h1>
+      <ul style="color: #334155; font-size: 14px; line-height: 1.6; padding-left: 20px;">
+        ${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}
+      </ul>
+      <p style="color: #64748b; font-size: 13px; margin-top: 24px;">
+        Open the Data Health page in your dashboard for details.
+      </p>
+    </div>
+  `;
+
+  try {
+    const response = await resend.emails.send({
+      from: "Meta Ads CRM <onboarding@resend.dev>",
+      to: process.env.ALERT_EMAIL_ADDRESS,
+      subject: `⚠️ ${subject}`,
+      html,
+    });
+    if (response.error) {
+      console.error("Resend API Error (sync alert):", response.error);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Error sending sync alert:", error);
+    return false;
+  }
+}

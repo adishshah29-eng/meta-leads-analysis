@@ -9,12 +9,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase, fetchAllRows } from "@/lib/supabase";
 import { sendDailyReport } from "@/lib/email";
 import { addDays, dayRangeToInstants, todayInAppTz } from "@/lib/dates";
+import { trackRun, triggerOf } from "@/lib/syncRuns";
 
 export async function GET(req: NextRequest) {
-  try {
-    const dateStr = new URL(req.url).searchParams.get("date") ?? addDays(todayInAppTz(), -1);
-    const { from, toExclusive } = dayRangeToInstants(dateStr, dateStr);
+  const dateStr = new URL(req.url).searchParams.get("date") ?? addDays(todayInAppTz(), -1);
 
+  const outcome = await trackRun("daily_report", triggerOf(req), async () => {
+    const { from, toExclusive } = dayRangeToInstants(dateStr, dateStr);
     const leads = await fetchAllRows<Record<string, unknown>>(() =>
       supabase
         .from("leads")
@@ -26,18 +27,18 @@ export async function GET(req: NextRequest) {
     );
 
     if (leads.length === 0) {
-      console.log(`No leads found for ${dateStr}. Skipping report.`);
-      return NextResponse.json({ success: true, message: `No leads on ${dateStr}, email skipped.` });
+      return { status: "ok", rows: 0, message: `No leads on ${dateStr}, email skipped.` };
     }
 
-    console.log(`Sending daily report for ${dateStr} with ${leads.length} leads...`);
-    const success = await sendDailyReport(leads, dateStr);
-    if (!success) throw new Error("Failed to send daily report email.");
+    const sent = await sendDailyReport(leads, dateStr);
+    if (!sent) throw new Error(`Failed to send daily report email for ${dateStr} (${leads.length} leads).`);
+    return { status: "ok", rows: leads.length, message: `Report sent for ${dateStr} with ${leads.length} leads.` };
+  });
 
-    return NextResponse.json({ success: true, message: `Report sent for ${dateStr} with ${leads.length} leads.` });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("Daily report cron error:", message);
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
-  }
+  const ok = outcome.status === "ok";
+  if (!ok) console.error("Daily report cron error:", outcome.message);
+  return NextResponse.json(
+    { success: ok, message: outcome.message, error: ok ? undefined : outcome.message },
+    { status: ok ? 200 : 500 }
+  );
 }

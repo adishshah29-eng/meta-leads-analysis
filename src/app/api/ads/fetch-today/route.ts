@@ -15,6 +15,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { syncAdSnapshots } from "@/lib/syncAds";
 import { addDays, daysBetweenInclusive, todayInAppTz } from "@/lib/dates";
+import { trackRun, triggerOf } from "@/lib/syncRuns";
+import { checkTokenHealth } from "@/lib/meta";
+import { sendSyncAlert } from "@/lib/email";
 
 export const maxDuration = 300;
 
@@ -53,27 +56,52 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  try {
-    const accounts = await syncAdSnapshots(since, until);
+  const trigger = triggerOf(req);
+  let accounts: Awaited<ReturnType<typeof syncAdSnapshots>> = [];
+
+  const outcome = await trackRun("ads", trigger, async () => {
+    accounts = await syncAdSnapshots(since, until);
     const upserted = accounts.reduce((s, a) => s + a.upserted, 0);
     const failed = accounts.filter((a) => a.error);
+    return {
+      status: failed.length === 0 ? "ok" : failed.length === accounts.length ? "failed" : "partial",
+      rows: upserted,
+      message:
+        failed.length === 0
+          ? `Fetched ${upserted} ad-day rows for ${since} → ${until}.`
+          : `Fetched ${upserted} rows for ${since} → ${until}; ${failed.length} account(s) failed: ${failed
+              .map((f) => `${f.account} (${f.error})`)
+              .join("; ")}`,
+      details: { since, until, accounts },
+    };
+  });
 
-    const message =
-      failed.length === 0
-        ? `Fetched ${upserted} ad-day rows for ${since} → ${until}.`
-        : `Fetched ${upserted} rows; ${failed.length} account(s) failed: ${failed
-            .map((f) => `${f.account} (${f.error})`)
-            .join("; ")}`;
-
-    return NextResponse.json(
-      { success: failed.length === 0, partial: failed.length > 0 && upserted > 0, upserted, since, until, accounts, message, error: failed.length ? message : undefined },
-      { status: failed.length === accounts.length ? 502 : 200 }
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[fetch-today] Error:", message);
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+  // Daily cron also watches the Meta token so it's renewed before data stops
+  if (trigger === "cron") {
+    const token = await checkTokenHealth();
+    if (token.checked && (!token.valid || (token.daysLeft !== null && token.daysLeft <= 7) || token.missingScopes.length)) {
+      await sendSyncAlert("Meta access token needs attention", [
+        !token.valid ? `Token is invalid${token.error ? `: ${token.error}` : ""}` : "",
+        token.daysLeft !== null && token.daysLeft <= 7 ? `Token expires in ${token.daysLeft} day(s)` : "",
+        token.missingScopes.length ? `Missing permissions: ${token.missingScopes.join(", ")}` : "",
+      ].filter(Boolean));
+    }
   }
+
+  const upserted = accounts.reduce((s, a) => s + a.upserted, 0);
+  return NextResponse.json(
+    {
+      success: outcome.status === "ok",
+      partial: outcome.status === "partial",
+      upserted,
+      since,
+      until,
+      accounts,
+      message: outcome.message,
+      error: outcome.status === "ok" ? undefined : outcome.message,
+    },
+    { status: outcome.status === "failed" ? 502 : 200 }
+  );
 }
 
 // Vercel cron uses GET

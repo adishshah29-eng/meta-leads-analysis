@@ -1,9 +1,12 @@
-
 "use client";
 
-import { useState } from "react";
-import { Menu, Zap } from "lucide-react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { usePathname, useSearchParams } from "next/navigation";
+import { AlertTriangle, Menu, XCircle, Zap } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
+
+type Level = "ok" | "warn" | "error";
 
 export function ClientLayout({
   children,
@@ -13,6 +16,24 @@ export function ClientLayout({
   projects: string[];
 }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const onDashboard = pathname.startsWith("/dashboard");
+
+  // Sync-health summary for the banner + sidebar badge (checked once per page)
+  const [health, setHealth] = useState<{ overall: Level; issues: Array<{ level: Level; text: string }> } | null>(null);
+  useEffect(() => {
+    if (!onDashboard) return;
+    let cancelled = false;
+    fetch("/api/health", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (!cancelled && j?.overall) setHealth(j); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [onDashboard, pathname]);
+
+  const showBanner = onDashboard && pathname !== "/dashboard/health" && health && health.overall !== "ok" && health.issues.length > 0;
+  const qs = searchParams.toString();
 
   return (
     <div className="flex min-h-screen relative">
@@ -45,10 +66,28 @@ export function ClientLayout({
         projects={projects}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
+        healthLevel={health?.overall ?? null}
       />
 
       {/* Main Content Area */}
       <main className="flex-1 lg:ml-64 min-h-screen pt-16 lg:pt-0 w-full max-w-full overflow-x-hidden">
+        {showBanner && (
+          <div
+            role="alert"
+            className={`flex items-start sm:items-center gap-2 px-4 py-2.5 text-sm border-b ${
+              health.overall === "error" ? "bg-red-50 border-red-200 text-red-800" : "bg-amber-50 border-amber-200 text-amber-900"
+            }`}
+          >
+            {health.overall === "error" ? <XCircle className="w-4 h-4 shrink-0 mt-0.5 sm:mt-0" aria-hidden /> : <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 sm:mt-0" aria-hidden />}
+            <span className="flex-1 min-w-0">
+              <strong className="font-semibold">Numbers may be incomplete:</strong> {health.issues[0].text}
+              {health.issues.length > 1 ? ` (+${health.issues.length - 1} more)` : ""}
+            </span>
+            <Link href={`/dashboard/health${qs ? `?${qs}` : ""}`} className="font-semibold underline underline-offset-2 whitespace-nowrap">
+              View details
+            </Link>
+          </div>
+        )}
         {children}
       </main>
     </div>
